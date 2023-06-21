@@ -24,32 +24,37 @@ class denseLayer:
 
 class activationSigmoid:
     def forward(self, inputs):
-        self.inputs = inputs
-        self.output = 1 / (1 + np.exp(inputs))
+        self.output = 1 / (1 + np.exp(-inputs))
 
     def backward(self, dvalues):
-        self.dinputs = dvalues * self.output * (1 - self.output)
+        self.dinputs = dvalues * (1 - self.output) * self.output
 
 class activationTanh:
     def forward(self, inputs):
-        self.inputs = inputs
         self.output = np.tanh(inputs)
     
     def backward(self, dvalues):
         self.dinputs = dvalues * (1 - self.output * self.output)
 
+class activationSoftMax:
+    def forward(self, inputs):
+        exp_values = np.exp(inputs - np.max(inputs, axis = 1, keepdims=True))
+        self.output = exp_values / np.sum(exp_values, axis = 1, keepdims=True)
+
+    def backward(self, dvalues):
+        self.dinputs = np.empty_like(dvalues)
+
+        for index, (single_output, single_dvalues) in enumerate(zip(self.output, dvalues)):
+            single_output = single_output.reshape(-1, 1)
+            jacobian_matrix = np.diagflat(single_output) - np.dot(single_output, single_output.T)
+
+            self.dinputs[index] = np.dot(jacobian_matrix, single_dvalues)
 # Loss
 # y needs to be in the form of masks rather than one hot encoded
 
-class loss:
-    def calculate(self, output, y):
-        sampleLosses = self.forward(output, y)
-        dataLoss = np.mean(sampleLosses)
-
-        return dataLoss
-
-class crossEntropy(loss):
+class crossEntropy():
     def forward(self, yPred, y):
+        self.input = yPred
         samples = len(yPred)
         yPredClipped = np.clip(yPred, 1e-7, 1 - 1e-7)
 
@@ -60,18 +65,19 @@ class crossEntropy(loss):
     def backward(self, dvalues, y):
         samples = len(dvalues)
         labels = len(dvalues[0])
-
         yTrue = np.eye(labels)[y]
 
         self.dinputs = -yTrue / dvalues
         self.dinputs = self.dinputs / samples
 
-class meanSquare(loss):
+class meanSquare():
     def forward(self, yPred, y):
+        self.input = yPred
         labels = len(yPred[0])
+
         yTrue = np.eye(labels)[y]
 
-
+        self.output = (yTrue - yPred) ** 2
         return np.mean((yTrue - yPred) ** 2, axis = -1)
     
     def backward(self, dvalues, y):
@@ -113,7 +119,7 @@ class momentum():
         weightUpdates = self.momentum * layer.weightMomentums - self.learningRate * layer.dweights
         layer.weightMomentums = weightUpdates
 
-        biasUpdates = self.momentum * layer.biasMomentums - self.learningRate * layer.dweights
+        biasUpdates = self.momentum * layer.biasMomentums - self.learningRate * layer.dbiases
         layer.biasMomentums = biasUpdates
 
         layer.weights += weightUpdates
@@ -134,7 +140,7 @@ class nag:
         layer.weights -= weightUpdates
 
         biasLookAhead = layer.dbiases - self.momentum * layer.biasMomentums
-        biasUpdates = self.momentum * layer.weightMomentums + self.learningRate * biasLookAhead
+        biasUpdates = self.momentum * layer.biasMomentums + self.learningRate * biasLookAhead
         layer.biases -= biasUpdates
 
 class adam:
@@ -164,7 +170,7 @@ class adam:
         biasMomentumsCorrected = layer.biasMomentums / (1 - self.beta1 ** (self.iterations + 1))
 
         layer.weightCache = self.beta2 * layer.weightCache + (1 - self.beta2) * layer.dweights ** 2
-        layer.biasCache = self.beta2 * layer.biasCache + (1 - self.beta2) * layer.dweights ** 2
+        layer.biasCache = self.beta2 * layer.biasCache + (1 - self.beta2) * layer.dbiases ** 2
 
         weightCacheCorrected = layer.weightCache / (1 - self.beta2 ** (self.iterations + 1))
         biasCacheCorrected = layer.biasCache / (1 - self.beta2 ** (self.iterations + 1))
@@ -179,24 +185,32 @@ class adam:
 
 def main(learningRate, momentumVal, numHidden, sizes, activationFunction, lossFunction, optimizer, decay, train, test, saveDir, exptDir, opt):
     nn = []
-    nn.append(denseLayer(32 * 32 * 3, sizes[0]))
+    nn.append(denseLayer(32 * 32 * 3, 32 * 32 * 3))
+    activationFunctions = []
+    activationFunctions.append(activationFunction())
 
     for i in range(numHidden):
-        if i != numHidden - 1:
-            nn.append(denseLayer(sizes[i], sizes[i + 1]))
+        if i != 0:
+            nn.append(denseLayer(sizes[i - 1], sizes[i]))
         else:
-            nn.append(denseLayer(sizes[i], 1))
+            nn.append(denseLayer(32 * 32 * 3, sizes[i]))
 
-    nn.append(denseLayer(1, 1))
+        activationFunctions.append(activationFunction())
+
+    nn.append(denseLayer(sizes[numHidden - 1], 10))
+    activationFunctions.append(activationSoftMax());
 
     nn = np.asarray(nn)
+    activationFunctions = np.asarray(activationFunctions)
 
     files = glob(f"{train}/*")
 
-    X = np.asarray([cv2.imread(x, cv2.IMREAD_UNCHANGED).flatten() for x in files])
+    X = np.asarray([cv2.imread(x, cv2.IMREAD_UNCHANGED).flatten() for x in files]).astype(np.float64)
+    # X = X.astype(np.float64)
+    X = (X - 127.5) / 127.5
 
     y = pd.read_csv("trainLabels.csv")
-
+    # print(X.shape)
     encodingLabels = {
         'frog': 0, 
         'truck': 1, 
@@ -214,14 +228,34 @@ def main(learningRate, momentumVal, numHidden, sizes, activationFunction, lossFu
 
     y = y['label'].to_numpy()
 
+    def predict(X):
+        for i in range(len(nn)):                    
+            if i == 0:
+                nn[i].forward(X)
+            else:
+                nn[i].forward(activationFunctions[i-1].output)
+
+            activationFunctions[i].forward(nn[i].output)
+        
+        return activationFunctions[-1].output
+
     for i in range(y.shape[0]):
         y[i] = encodingLabels[y[i]]
 
+    y = y.astype(np.int32)
+
     perm = np.random.permutation(len(y))
     X, y = X[perm], y[perm]
+    trainEnd = int(0.8 * len(X))
 
-    for epoch in range(1, 6):
-        for step in range(1, len(X)//batchSize):
+    X, Xval, y, yval = X[:trainEnd], X[trainEnd:], y[:trainEnd], y[trainEnd:]
+    minLoss = None
+
+    # Training
+    logs = []
+    epoch = 1
+    while epoch < 6:
+        for step in range(1, len(X)//batchSize + 1):
             X_batch = X[(step - 1) * batchSize : step * batchSize]
             y_batch = y[(step - 1) * batchSize : step * batchSize]
 
@@ -229,37 +263,82 @@ def main(learningRate, momentumVal, numHidden, sizes, activationFunction, lossFu
                 if i == 0:
                     nn[i].forward(X_batch)
                 else:
-                    nn[i].forward(activationFunction.output)
+                    nn[i].forward(activationFunctions[i-1].output)
 
-                activationFunction.forward(nn[i].output)
+                activationFunctions[i].forward(nn[i].output)
 
-            loss = lossFunction.forward(activationFunction.output, y)
-
-            predictions = np.argmax(lossFunction.output)
+            predictions = np.argmax(activationFunctions[-1].output)
 
             err = accuracy(predictions, y_batch)
 
-            if not step % 100:
-                print(f"Epoch {epoch}, Step {step}, Loss: {loss}, Error: {err}, lr: {activationFunction.lr}")
+            lossFunction.backward(activationFunctions[-1].output, y_batch)
 
-            lossFunction.backward(lossFunction.output, y)
-            for i in range(len(nn) - 1, 0, -1):
+            for i in range(len(nn) - 1, -1, -1):
                 if i == len(nn) - 1:
-                    nn[i].backward(lossFunction.dinputs)
+                    activationFunctions[i].backward(lossFunction.dinputs)
                 else:
-                    nn[i].backward(activationFunction.dinputs)
+                    activationFunctions[i].backward(nn[i + 1].dinputs)
+                
+                nn[i].backward(activationFunctions[i].dinputs)
 
-                activationFunction.backward(nn[i].dinputs)
-
+            
             if opt == "adam":
                 optimizer.preUpdateParams()
             
-            optimizer.updateParams()
+            for layer in nn:
+                optimizer.updateParams(layer)
 
             if opt == "adam":
                 optimizer.postUpdateParams()
 
+            if (not step % 100) or (step == len(X) // batchSize):
+                yvalPred = predict(Xval)
 
+                errVal = accuracy(yvalPred, yval)
+                lossVal = np.mean(lossFunction.forward(yvalPred, yval))
+
+                print(f"Epoch {epoch}, Step {step}, Loss: {lossVal}, Error: {errVal}, lr: {optimizer.learningRate}")
+                logs.append(f"Epoch {epoch}, Step {step}, Loss: {lossVal}, Error: {errVal}, lr: {optimizer.learningRate}")
+                if anneal == "true": 
+                    if minLoss == None:
+                        minLoss = lossVal
+                    elif minLoss > lossVal:
+                        minLoss = lossVal
+                        optimizer.learningRate /= 2.0
+                        epoch -= 1
+                        break
+
+        epoch += 1
+
+
+    testFiles = glob(f"{test}/*")
+    # print(len(testFiles))
+
+    XTest = np.asarray([cv2.imread(x, cv2.IMREAD_UNCHANGED).flatten() for x in testFiles]).astype(np.float64)
+
+    # print(XTest.shape)
+    # XTest = XTest.astype(np.float64)
+    XTest = (XTest - 127.5) / 127.5
+
+    yTestPred = np.argmax(predict(XTest), axis=0)
+    yTestPred = yTestPred.astype(np.int32)
+    yfin = []
+    for i in range(len(yTestPred)):
+        yfin.append(reverseEncoding[yTestPred[i]])
+
+    # yfin = np.asarray(yfin)
+    # logs = np.asarray(logs)
+
+    model = []  
+    for layer in nn:
+        model.append([layer.weights, layer.biases])
+    
+    # model = np.asarray(model)
+
+    np.savetxt(f"{saveDir}/model.txt", model)
+    np.savetxt(f"sampleSubmission.csv", yfin, delimiter=", ", fmt="%s")
+    np.savetxt(f"{exptDir}/logs.txt", logs, fmt="%s")
+    
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
@@ -319,9 +398,9 @@ if __name__ == "__main__":
         sys.exit(0)
         
     if activation == "sigmoid":
-        activationFunction = activationSigmoid()
+        activationFunction = activationSigmoid
     else:
-        activationFunction = activationTanh()
+        activationFunction = activationTanh
 
     if lossFunc == "sq":
         lossFunction = meanSquare()
@@ -351,7 +430,3 @@ if __name__ == "__main__":
         decay = 1
 
     main(learningRate, momentumVal, numHidden, sizes, activationFunction, lossFunction, optimizer, decay, train, test, saveDir, exptDir, opt)
-    
-
-# total steps per epoch = 50000 / batch_size
-# print every 100 steps
