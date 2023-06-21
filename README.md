@@ -23,3 +23,5 @@ This model has not been tested in its entirety due to the following error genera
 Thus it is not a guarantee any code below loading test data will work or not. However, the logs will still be visible on the terminal after executing the bash script.
 
 Nesterov Accerlerated Gradient (nag) is executed properly, however, the logic applied is not guaranteed to be correct, as I could not find any reliable sources for the theory / implementation behind the same.
+
+Reference - [NNFS Book](https://nnfs.io/)
